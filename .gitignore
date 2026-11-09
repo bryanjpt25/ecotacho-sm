@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Entornos virtuales (Virtual Environments)
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# Variables secretas y credenciales
+.env
+secrets.json
+
+# Configuración de IDEs
+.vscode/
+.idea/
+
+# Registros y base de datos temporales
+*.log
+*.sqlite3
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Datasets y modelos IA pesados (Edge Impulse / TinyML)
+*.tflite
+*.onnx
+*.bin
+data/raw/*
+!data/.gitkeep
