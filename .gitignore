@@ -33,3 +33,5 @@ desktop.ini
 *.bin
 data/raw/*
 !data/.gitkeep
+
+.pio/
