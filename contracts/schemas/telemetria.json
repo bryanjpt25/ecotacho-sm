@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ecotacho/telemetria.json",
+  "title": "Telemetría periódica (ESP32 sensores -> broker)",
+  "description": "Tópico ecotacho/{tacho_id}/telemetria, cada 5 s. Si un sensor falla se envía null (el backend lo guarda y el dashboard muestra '—').",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["volumen_pct", "peso_total_kg", "uptime_ms"],
+  "properties": {
+    "volumen_pct": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+    "peso_total_kg": { "type": ["number", "null"], "minimum": 0 },
+    "uptime_ms": { "type": "integer", "minimum": 0 }
+  }
+}

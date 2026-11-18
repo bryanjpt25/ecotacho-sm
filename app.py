@@ -2,7 +2,7 @@ from fastapi import FastAPI
 
 # Inicialización de la aplicación FastAPI
 app = FastAPI(
-    title="Eco Punto Smart - API Ingestion & Gateway",
+    title="EcoTacho SM - API Ingestion & Gateway",
     description="Backend para recepción de telemetría MQTT y persistencia en MongoDB",
     version="0.1.0"
 )
@@ -12,7 +12,7 @@ async def root():
     """Ruta base para verificar el estado del servidor."""
     return {
         "status": "online",
-        "project": "Eco Punto Smart",
+        "project": "EcoTacho SM",
         "message": "Servidor FastAPI inicializado correctamente."
     }
 

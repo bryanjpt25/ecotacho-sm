@@ -1,6 +1,6 @@
 # ♻️ EcoTacho SM
 
-Repositorio oficial para el desarrollo del prototipo de sistema inteligente de clasificación de residuos (**Eco Punto Smart**) para el Hackathon CITE - UNMSM[cite: 2].
+Repositorio oficial para el desarrollo del prototipo de sistema inteligente de clasificación de residuos para el **Hackathon Smart City San Marcos 2026** (CITE / FIEE - UNMSM), desafío **Medio ambiente**. Evento presencial: **miércoles 2 de diciembre de 2026, 9:00–17:00**.
 
 ---
 
@@ -44,41 +44,32 @@ Repositorio oficial para el desarrollo del prototipo de sistema inteligente de c
                                                                       |   DASHBOARD WEB (UI)     |
                                                                       | (React / Streamlit)      |
                                                                       +--------------------------+
+```
 
-## 📅 Hoja de Ruta de Desarrollo (4 Semanas) 
+## 📅 Plan y documentación
 
-### 🔹 Semana 1: Arquitectura, Adquisición de Datasets y Pruebas de Concepto (PoC)
-- **Álvaro:** Ensamblar protoboard del ESP32 estándar. Implementar divisores de tensión para lecturas lógicas de 5V a 3.3V (HC-SR04). Verificar lecturas RAW del HX711. Integrar y probar fuente de poder de 5V 5A (tipo adaptador).
-- **Bryan:** Configurar IDE con la plataforma base ESP32-CAM MB (conexión directa por micro-USB). Habilitar cámara OV2640 y recopilar dataset de basura usando Edge Impulse Data Forwarder.
-- **Sadith:** Levantar broker Mosquitto en red local/nube. Diseñar árbol de tópicos MQTT y definir políticas QoS.
-- **Maricielo:** Aprovisionar VPS o entorno local. Desplegar contenedores Docker (Broker MQTT y MongoDB). Diseñar los esquemas de colecciones en Mongo (`telemetry_logs`, `classification_history`).
-- **Milagros:** Diseñar wireframes (Figma) del dashboard enfocado en visualización de datos extraídos desde MongoDB.
+La hoja de ruta de 4 semanas fue reemplazada por un plan de **14 días** (el evento es el 2 de dic). Todo está en `docs/`:
 
-### 🔹 Semana 2: Entrenamiento del Modelo AI, Ensamblaje de Hardware y Backend
-- **Álvaro:** Migrar de protoboard a PCB perforada. Programar script en C++ con filtro de media móvil y rutina de tara.
-- **Bryan:** Entrenar modelo en la nube (Edge Impulse). Aplicar cuantización INT8 y exportarlo como librería C++. Desplegar el código en la ESP32-CAM y probar inferencia por puerto serial.
-- **Sadith:** Integrar librería `PubSubClient`. Implementar rutinas no bloqueantes con `millis()` y configurar el Last Will and Testament (LWT) para health-checks.
-- **Maricielo:** Desarrollar API (Node.js/FastAPI) que actúe como puente: se suscribe al broker MQTT y ejecuta operaciones `insertOne()` y `find()` en MongoDB de manera asíncrona.
-- **Milagros:** Maquetar componentes estáticos del dashboard (tarjetas de estado, gráficos de barras).
+| Documento | Contenido |
+|-----------|-----------|
+| [`docs/contratos.md`](docs/contratos.md) | **Fuente de verdad:** tópicos MQTT, JSON, MongoDB, REST, WebSocket (esquemas en `contracts/`) |
+| [`docs/02-hardware-pinout.md`](docs/02-hardware-pinout.md) | Pinout corregido, energía, calibración, comprobaciones |
+| [`docs/03-plan-14-dias.md`](docs/03-plan-14-dias.md) | Hitos, gates y matriz *funciona / se simula / falta* |
+| [`docs/04-bom-y-costos.md`](docs/04-bom-y-costos.md) | BOM estimada (reemplazar con boletas reales) |
+| [`docs/05-impacto-y-linea-base.md`](docs/05-impacto-y-linea-base.md) | Línea base, KPIs, cálculo de impacto sin inventar cifras |
+| [`docs/06-ficha-del-proyecto.md`](docs/06-ficha-del-proyecto.md) | Borrador de la ficha pedida por las bases |
+| [`docs/07-pitch-y-declaracion-ia.md`](docs/07-pitch-y-declaracion-ia.md) | Guion, rúbrica oficial, preguntas del jurado, declaración de IA |
 
-### 🔹 Semana 3: Integración de Sistemas (Nodos ESP32 + Nube) y Calibración
-- **Álvaro:** Integrar sensores en el chasis. Calibrar factor de escala del HX711. Ajustar umbrales de "Tacho Lleno" (>85% volumen).
-- **Bryan:** Conectar pantalla LCD 16x2 vía I2C a la ESP32-CAM. Programar lógica C++ para reflejar instrucción al usuario ("Plástico detectado") post-inferencia.
-- **Sadith:** Establecer comunicación bidireccional estable vía Wi-Fi, asegurando que los fallos de lectura en MicroSD sean irrelevantes al derivar toda la data a la nube.
-- **Maricielo:** Implementar servidor WebSocket puenteado a MongoDB/Broker para pushing en tiempo real hacia el frontend (sin necesidad de recargar la página).
-- **Milagros:** Conectar frontend a la API/WebSockets. Consultar colecciones de MongoDB para poblar gráficos históricos de recolección mensual.
+Validar contratos: `pip install jsonschema && python contracts/validate_examples.py`.
 
-### 🔹 Semana 4: Desarrollo del Dashboard, Pruebas de Estrés y Preparación del Pitch
-- **Álvaro & Bryan:** Pruebas de borde: variaciones de iluminación para la OV2640, confirmación de voltajes estables y ajuste de umbrales de confianza (>70%) para evitar falsos positivos. Gestión de cableado.
-- **Sadith & Maricielo:** Pruebas de resiliencia Wi-Fi. Verificar reconexión automática y asegurar que el driver de MongoDB en el backend maneje correctamente los picos de ingesta de datos.
-- **Milagros:** Pulido UI/UX. Ensayos cronometrados del pitch (3-5 minutos).
+> **Repositorio público:** nunca subir SSID, contraseñas ni claves. Usar `secrets.h` / `.env` (ignorados) y archivos `*.example`.
 
 ---
 
 ## 🎯 Módulos Demostrables Core (Demo Day)
 
-1. **Inferencia Edge en Tiempo Real (Demo Local):** El juez aproxima un envase a la cámara. En fracciones de segundo, la rutina TinyML procesa la imagen usando solo RAM y PSRAM, mostrando "PLÁSTICO" en el LCD (latencia cercana a cero, sin depender de red).
-2. **Sincronización Cloud con MongoDB (Data Pipeline):** Al clasificar y depositar el objeto, ambos ESP32 publican su telemetría. La API captura esto e inserta un nuevo documento en MongoDB. El Dashboard consulta la base de datos y actualiza las gráficas web en < 1 segundo.
+1. **Inferencia Edge en Tiempo Real (Demo Local):** El juez aproxima un envase a la cámara. En fracciones de segundo, la rutina TinyML procesa la imagen usando solo RAM y PSRAM, mostrando "PLÁSTICO" en el LCD (sin depender de red; latencia a medir).
+2. **Sincronización Cloud con MongoDB (Data Pipeline):** Al clasificar y depositar el objeto, ambos nodos publican sus eventos y el backend los correlaciona. La API captura esto e inserta un nuevo documento en MongoDB. El Dashboard consulta la base de datos y actualiza las gráficas web (meta: < 2 s en red local).
 3. **Resiliencia y Health-Checks:** Si el módulo pierde Wi-Fi, no se bloquea. Cuando la red vuelve, el sistema se reconecta automáticamente, garantizando que el flujo de datos hacia MongoDB se retome sin resetear hardware.
 
 ---
@@ -92,6 +83,8 @@ Repositorio oficial para el desarrollo del prototipo de sistema inteligente de c
 ├── milagros/         # Figma, UI/UX Frontend, WebSockets client y Pitch (Telecom 3)
 ├── sadith/           # MQTT Broker Mosquitto, PubSubClient, LWT y Wi-Fi (Telecom 1)
 ├── data/             # Datasets de prueba locales y logs (excluidos por .gitignore)
+├── docs/             # Contratos, plan, BOM, impacto, ficha y pitch
+├── contracts/        # JSON Schemas y ejemplos validables
 ├── .gitignore        # Reglas de exclusión de binarios, .env y temporales
 ├── app.py            # Servidor / API de integración local
 └── requirements.txt  # Dependencias del proyecto

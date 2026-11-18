@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ecotacho/estado.json",
+  "title": "Estado del nodo (retained + LWT)",
+  "description": "Tópico ecotacho/{tacho_id}/estado/{nodo} (nodo = vision | sensores), retained. 'online' al conectar; el LWT publica 'offline'.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["estado"],
+  "properties": {
+    "estado": { "enum": ["online", "offline"] },
+    "fw": { "type": "string" }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ecotacho/peso_evento.json",
+  "title": "Evento de peso (ESP32 sensores -> broker)",
+  "description": "Tópico ecotacho/{tacho_id}/peso/evento. Se publica cuando el peso cambió más que el umbral de ruido y lleva >= 2 s estable. delta_kg muy negativo = vaciado por limpieza (no cuenta como depósito).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "delta_kg", "peso_total_kg", "uptime_ms"],
+  "properties": {
+    "event_id": { "type": "string", "pattern": "^p-[0-9a-f]{4,8}-[0-9]{6}$" },
+    "delta_kg": { "type": "number" },
+    "peso_total_kg": { "type": "number", "minimum": 0 },
+    "uptime_ms": { "type": "integer", "minimum": 0 }
+  }
+}

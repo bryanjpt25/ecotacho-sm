@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ecotacho/vision_evento.json",
+  "title": "Evento de visión (ESP32-CAM -> broker)",
+  "description": "Tópico ecotacho/{tacho_id}/vision/evento. tacho_id y nodo salen del tópico, no del payload. Sin timestamp: el backend asigna received_at.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "clase", "confianza", "fuente", "uptime_ms"],
+  "properties": {
+    "event_id": { "type": "string", "pattern": "^v-[0-9a-f]{4,8}-[0-9]{6}$", "description": "v-<nonce de arranque>-<contador>. El nonce (esp_random() al arrancar) evita que, tras un reinicio, el contador repetido sea descartado como duplicado." },
+    "clase": { "enum": ["vacio", "plastico", "papel_carton", "organico", "otros", "no_seguro"] },
+    "confianza": { "type": "number", "minimum": 0, "maximum": 1 },
+    "fuente": { "enum": ["ia", "manual"], "description": "'manual' = Plan B con pulsadores; se muestra marcado en el dashboard" },
+    "uptime_ms": { "type": "integer", "minimum": 0, "description": "Solo ordena eventos de un mismo nodo" }
+  }
+}
