@@ -88,3 +88,4 @@ Validar contratos: `pip install jsonschema && python contracts/validate_examples
 ├── .gitignore        # Reglas de exclusión de binarios, .env y temporales
 ├── app.py            # Servidor / API de integración local
 └── requirements.txt  # Dependencias del proyecto
+```
