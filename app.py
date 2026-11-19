@@ -1,7 +1,7 @@
 """EcoTacho SM — backend: ingesta MQTT -> MongoDB, correlación visión + peso y API.
 
-Contratos: docs/contratos.md. Este archivo implementa la ingesta, la correlación
-y /api/v1/salud; los demás endpoints REST y el WebSocket son el siguiente paso.
+Contratos: docs/contratos.md. Implementa la ingesta, la correlación y los endpoints
+REST (salud, estado, depositos, resumen). El WebSocket es el siguiente paso.
 """
 import asyncio
 import json
@@ -13,12 +13,17 @@ from datetime import datetime, timezone
 import paho.mqtt.client as mqtt
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from logica import (
     Correlador,
     Pendiente,
+    actualizar_alerta,
+    armar_resumen,
+    limites_periodo,
+    parsear_fecha_iso,
     parsear_topico,
     validar_peso,
     validar_telemetria,
@@ -28,13 +33,15 @@ from logica import (
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 MQTT_BROKER = os.getenv("MQTT_BROKER", "localhost")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
+DEFAULT_TACHO_ID = os.getenv("DEFAULT_TACHO_ID", "tacho-unmsm-01")
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
 
 TICK = "__tick__"
 
-mongo_client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=2000)
+mongo_client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=2000, tz_aware=True)
 db = mongo_client["ecotacho_db"]
 correlador = Correlador()
+alertas = {}  # tacho_id -> alerta_llenado vigente (con histéresis)
 
 loop = None
 cola = None
@@ -221,6 +228,7 @@ async def procesar(topic, raw):
         if error:
             print(f"[Ingesta] telemetria descartada: {error}")
             return
+        alertas[tacho_id] = actualizar_alerta(alertas.get(tacho_id, False), datos["volumen_pct"])
         await db.telemetry_logs.insert_one(
             {
                 "tacho_id": tacho_id,
@@ -277,7 +285,7 @@ async def lifespan(app):
     mongo_client.close()
 
 
-app = FastAPI(title="EcoTacho SM Backend", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="EcoTacho SM Backend", version="1.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -299,3 +307,134 @@ async def salud():
         "mongo": mongo,
         "mqtt": mqtt_estado,
     }
+
+
+# --- Errores y utilidades de la API ----------------------------------------------------
+class ErrorApi(Exception):
+    def __init__(self, status, codigo, mensaje):
+        self.status = status
+        self.codigo = codigo
+        self.mensaje = mensaje
+
+
+@app.exception_handler(ErrorApi)
+async def manejar_error_api(request, exc):
+    return JSONResponse(
+        status_code=exc.status,
+        content={"error": {"codigo": exc.codigo, "mensaje": exc.mensaje}},
+    )
+
+
+@app.exception_handler(PyMongoError)
+async def manejar_error_mongo(request, exc):
+    return JSONResponse(
+        status_code=503,
+        content={"error": {"codigo": "mongo_no_disponible", "mensaje": "MongoDB no está disponible"}},
+    )
+
+
+def iso(dt):
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def leer_fecha(nombre, valor):
+    if valor is None or valor == "":
+        return None
+    try:
+        return parsear_fecha_iso(valor)
+    except ValueError:
+        raise ErrorApi(400, "parametro_invalido", f"{nombre} debe ser ISO-8601 (ej. 2026-11-18T21:45:00Z)")
+
+
+# --- Endpoints REST -----------------------------------------------------------------------
+@app.get("/api/v1/tachos/{tacho_id}/estado")
+async def estado(tacho_id: str):
+    tele = await db.telemetry_logs.find_one(
+        {"tacho_id": tacho_id, "volumen_pct": {"$ne": None}}, sort=[("received_at", -1)]
+    )
+    docs_nodos = await db.node_status.find({"tacho_id": tacho_id}).to_list(length=10)
+    if tele is None and not docs_nodos:
+        raise ErrorApi(404, "tacho_no_encontrado", f"No hay datos del tacho {tacho_id}")
+
+    nodos = {n: {"estado": "desconocido", "last_seen": None} for n in ("sensores", "vision")}
+    for d in docs_nodos:
+        if d["nodo"] in nodos:
+            nodos[d["nodo"]] = {"estado": d["estado"], "last_seen": iso(d["last_seen"])}
+
+    volumen = tele["volumen_pct"] if tele else None
+    alerta = alertas.get(tacho_id)
+    if alerta is None:  # tras un reinicio del backend, se deduce de la última lectura
+        alerta = actualizar_alerta(False, volumen) if volumen is not None else False
+
+    return {
+        "tacho_id": tacho_id,
+        "volumen_pct": volumen,
+        "peso_total_kg": tele["peso_total_kg"] if tele else None,
+        "alerta_llenado": alerta,
+        "nodos": nodos,
+        "actualizado_en": iso(tele["received_at"]) if tele else None,
+    }
+
+
+@app.get("/api/v1/depositos")
+async def depositos(
+    desde: str | None = None,
+    hasta: str | None = None,
+    limite: str = "50",
+    tacho_id: str = DEFAULT_TACHO_ID,
+):
+    d = leer_fecha("desde", desde)
+    h = leer_fecha("hasta", hasta)
+    if d and h and d > h:
+        raise ErrorApi(400, "parametro_invalido", "desde no puede ser posterior a hasta")
+    try:
+        lim = int(limite)
+    except ValueError:
+        lim = 0
+    if not 1 <= lim <= 500:
+        raise ErrorApi(400, "parametro_invalido", "limite debe ser un entero entre 1 y 500")
+
+    filtro = {"tacho_id": tacho_id}
+    rango = {}
+    if d:
+        rango["$gte"] = d
+    if h:
+        rango["$lte"] = h
+    if rango:
+        filtro["received_at"] = rango
+
+    total = await db.deposits.count_documents(filtro)
+    proyeccion = {
+        "_id": 0,
+        "event_id_vision": 1,
+        "event_id_peso": 1,
+        "clase": 1,
+        "delta_kg": 1,
+        "peso_total_kg": 1,
+        "fuente": 1,
+        "received_at": 1,
+    }
+    items = []
+    async for doc in db.deposits.find(filtro, proyeccion).sort("received_at", -1).limit(lim):
+        doc["received_at"] = iso(doc["received_at"])
+        items.append(doc)
+    return {"total": total, "items": items}
+
+
+@app.get("/api/v1/resumen")
+async def resumen(periodo: str = "semana", tacho_id: str = DEFAULT_TACHO_ID):
+    try:
+        desde, hasta = limites_periodo(periodo, datetime.now(timezone.utc))
+    except ValueError as e:
+        raise ErrorApi(400, "parametro_invalido", str(e))
+    grupos = await db.deposits.aggregate(
+        [
+            {"$match": {"tacho_id": tacho_id, "received_at": {"$gte": desde, "$lte": hasta}}},
+            {"$group": {"_id": "$clase", "kg": {"$sum": "$delta_kg"}, "n": {"$sum": 1}}},
+        ]
+    ).to_list(length=None)
+    return {"periodo": periodo, "desde": iso(desde), "hasta": iso(hasta), **armar_resumen(grupos)}

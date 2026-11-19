@@ -4,9 +4,15 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from datetime import datetime, timezone  # noqa: E402
+
 from logica import (  # noqa: E402
     Correlador,
     Pendiente,
+    actualizar_alerta,
+    armar_resumen,
+    limites_periodo,
+    parsear_fecha_iso,
     parsear_topico,
     validar_peso,
     validar_telemetria,
@@ -87,6 +93,39 @@ class TestCorrelador(unittest.TestCase):
         self.assertIsNone(c.siguiente("t2"))
         c.quitar_primero("t2")  # no debe fallar
         self.assertEqual(c.total(), 1)
+
+
+class TestApi(unittest.TestCase):
+    def test_alerta_con_historesis(self):
+        a = False
+        for vol, esperado in [(50, False), (84, False), (85, True), (80, True), (71, True), (70, False), (75, False), (90, True)]:
+            a = actualizar_alerta(a, vol)
+            self.assertEqual(a, esperado, vol)
+
+    def test_fecha_iso(self):
+        self.assertEqual(parsear_fecha_iso("2026-11-18T21:45:00Z"), datetime(2026, 11, 18, 21, 45, tzinfo=timezone.utc))
+        self.assertEqual(parsear_fecha_iso("2026-11-18T16:45:00-05:00"), datetime(2026, 11, 18, 21, 45, tzinfo=timezone.utc))
+        self.assertEqual(parsear_fecha_iso("2026-11-18"), datetime(2026, 11, 18, tzinfo=timezone.utc))
+        for malo in ["ayer", "", "2026-13-45"]:
+            with self.assertRaises(ValueError):
+                parsear_fecha_iso(malo)
+
+    def test_limites_periodo(self):
+        ahora = datetime(2026, 11, 19, 20, 6, tzinfo=timezone.utc)  # 15:06 en Lima
+        self.assertEqual(limites_periodo("dia", ahora), (datetime(2026, 11, 19, 5, 0, tzinfo=timezone.utc), ahora))
+        self.assertEqual(limites_periodo("semana", ahora), (datetime(2026, 11, 13, 5, 0, tzinfo=timezone.utc), ahora))
+        # 02:00 UTC del 19 todavía es el 18 en Lima
+        madrugada = datetime(2026, 11, 19, 2, 0, tzinfo=timezone.utc)
+        self.assertEqual(limites_periodo("dia", madrugada)[0], datetime(2026, 11, 18, 5, 0, tzinfo=timezone.utc))
+        with self.assertRaises(ValueError):
+            limites_periodo("mes", ahora)
+
+    def test_resumen(self):
+        r = armar_resumen([{"_id": "plastico", "kg": 0.31, "n": 1}, {"_id": "sin_clasificar", "kg": 0.2, "n": 1}])
+        self.assertEqual(r["depositos"], 2)
+        self.assertEqual(r["total_kg"], 0.51)
+        self.assertEqual(r["por_clase"], {"plastico": 0.31, "papel_carton": 0.0, "otros": 0.0, "no_seguro": 0.0, "sin_clasificar": 0.2})
+        self.assertEqual(armar_resumen([])["total_kg"], 0.0)
 
 
 if __name__ == "__main__":

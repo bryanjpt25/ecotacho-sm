@@ -1,8 +1,8 @@
-# EcoTacho SM — Contratos Técnicos e Interfaces (v1.2)
+# EcoTacho SM — Contratos Técnicos e Interfaces (v1.3)
 
 | Campo | Valor |
 |---|---|
-| Versión | 1.2 (borrador) |
+| Versión | 1.3 (borrador) |
 | Fecha | 18-nov-2026 |
 | Autor | Bryan |
 | Estado | Borrador; los puntos marcados **(propuesta)** son decisiones de diseño ajustables |
@@ -142,11 +142,11 @@ En `deposits` con `clase: "sin_clasificar"`, `event_id_vision` y `fuente` son `n
 
 ## 5. Endpoints REST (`/api/v1`)
 
-Fechas en ISO-8601 UTC (`2026-11-18T21:45:00Z`). Errores con el formato:
+Fechas en ISO-8601 UTC con `Z` (`2026-11-18T21:45:00Z`); si se envía un desplazamiento como `+00:00`, el signo `+` debe ir codificado (`%2B`). Una fecha sin zona horaria se interpreta como UTC. Los endpoints sin `{id}` en la ruta aceptan el parámetro opcional `tacho_id` (por defecto `tacho-unmsm-01`). Errores con el formato:
 ```json
 { "error": { "codigo": "parametro_invalido", "mensaje": "desde debe ser ISO-8601" } }
 ```
-Códigos HTTP: 200, 400 (parámetro inválido), 404 (tacho inexistente), 503 (MongoDB no disponible).
+Códigos HTTP: 200; 400 con `codigo: "parametro_invalido"`; 404 con `codigo: "tacho_no_encontrado"` (el tacho aún no tiene telemetría ni estado de nodos); 503 con `codigo: "mongo_no_disponible"`.
 
 ### `GET /api/v1/tachos/{id}/estado`
 ```json
@@ -164,7 +164,7 @@ Códigos HTTP: 200, 400 (parámetro inválido), 404 (tacho inexistente), 503 (Mo
 ```
 
 ### `GET /api/v1/depositos?desde=&hasta=&limite=`
-`limite` por defecto 50, máximo 500; orden por `received_at` descendente.
+`desde` y `hasta` son opcionales e inclusivos; si `desde` es posterior a `hasta`, responde 400. `limite` por defecto 50, entre 1 y 500; orden por `received_at` descendente. `total` cuenta **todos** los depósitos que cumplen el filtro, aunque `items` esté recortado por `limite`.
 ```json
 {
   "total": 1,
@@ -183,7 +183,7 @@ Códigos HTTP: 200, 400 (parámetro inválido), 404 (tacho inexistente), 503 (Mo
 ```
 
 ### `GET /api/v1/resumen?periodo=semana`
-`periodo`: `dia` o `semana`.
+`periodo`: `dia` o `semana` (por defecto `semana`). Los límites siguen el calendario de **Lima**: `dia` va desde las 00:00 de hoy hasta el momento de la consulta; `semana` desde las 00:00 de hace 6 días (hoy incluido). `desde` y `hasta` se devuelven en UTC. `por_clase` siempre trae las cinco claves, con `0` cuando no hay depósitos.
 ```json
 {
   "periodo": "semana",
@@ -200,6 +200,9 @@ Códigos HTTP: 200, 400 (parámetro inválido), 404 (tacho inexistente), 503 (Mo
   }
 }
 ```
+
+### Notas de `GET /api/v1/tachos/{id}/estado`
+`volumen_pct`, `peso_total_kg` y `actualizado_en` son `null` si todavía no hay telemetría. Cada nodo (`sensores`, `vision`) trae `estado: "desconocido"` y `last_seen: null` si aún no ha reportado. `alerta_llenado` usa histéresis (se activa en 85 %, se limpia en 70 %).
 
 ### `GET /api/v1/salud`
 ```json
@@ -235,6 +238,7 @@ Al conectarse, el servidor envía **primero** un `estado_nodo` por cada nodo y l
 ## 7. Control de cambios
 
 * Cualquier cambio de un tópico, un campo o un endpoint se hace en este archivo, con una línea en el registro de cambios y subiendo la versión.
+* **v1.3:** endpoints REST implementados (`estado`, `depositos`, `resumen`): parámetro `tacho_id`, significado de `total`, ventanas de `resumen` en hora de Lima, valores `desconocido` y códigos de error.
 * **v1.2:** detalles de persistencia (`vacio`, retiros y depósitos sin clasificar).
 * **v1.1:** respuestas REST con ejemplos y errores; eventos WebSocket completos; reglas de campos y rangos; `nodo`, payload de `estado` y `estado_correlacion` definidos; peso negativo, cola FIFO y deduplicación con índices; alerta de llenado calculada en backend.
 

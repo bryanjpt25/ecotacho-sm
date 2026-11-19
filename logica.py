@@ -4,11 +4,16 @@ Validación de mensajes MQTT y correlación visión + peso, según docs/contrato
 """
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 VENTANA_S = 8.0
 CLASES = {"vacio", "plastico", "papel_carton", "otros", "no_seguro"}
 FUENTES = {"ia", "manual"}
 NODOS = {"sensores", "vision"}
+LIMA = timezone(timedelta(hours=-5))  # Lima no usa horario de verano
+ALERTA_ALTA = 85  # % de llenado que activa la alerta
+ALERTA_BAJA = 70  # % de llenado que la limpia (histéresis)
+CLASES_RESUMEN = ("plastico", "papel_carton", "otros", "no_seguro", "sin_clasificar")
 
 
 def es_numero(v):
@@ -126,3 +131,54 @@ class Correlador:
 
     def total(self):
         return sum(len(c) for c in self._colas.values())
+
+
+# --- Utilidades de la API REST -------------------------------------------------------
+def actualizar_alerta(actual, volumen_pct, alta=ALERTA_ALTA, baja=ALERTA_BAJA):
+    """Alerta de llenado con histéresis: se activa en >= alta y se limpia en <= baja."""
+    if volumen_pct >= alta:
+        return True
+    if volumen_pct <= baja:
+        return False
+    return actual
+
+
+def parsear_fecha_iso(texto):
+    """ISO-8601 -> datetime con zona UTC. Sin zona horaria se asume UTC. ValueError si es inválida."""
+    d = datetime.fromisoformat(texto)
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d.astimezone(timezone.utc)
+
+
+def limites_periodo(periodo, ahora_utc):
+    """'dia' = desde las 00:00 de hoy (hora de Lima); 'semana' = desde las 00:00 de hace 6 días.
+
+    Devuelve (desde, hasta) en UTC; hasta es el momento de la consulta.
+    """
+    if periodo == "dia":
+        dias_atras = 0
+    elif periodo == "semana":
+        dias_atras = 6
+    else:
+        raise ValueError("periodo debe ser 'dia' o 'semana'")
+    ahora_lima = ahora_utc.astimezone(LIMA)
+    inicio = (ahora_lima - timedelta(days=dias_atras)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return inicio.astimezone(timezone.utc), ahora_utc
+
+
+def armar_resumen(grupos):
+    """grupos: [{'_id': clase, 'kg': suma, 'n': cantidad}] -> resumen con todas las clases (0 si no hay)."""
+    por_clase = {c: 0.0 for c in CLASES_RESUMEN}
+    total = 0.0
+    cantidad = 0
+    for g in grupos:
+        kg = float(g["kg"])
+        por_clase[g["_id"]] = por_clase.get(g["_id"], 0.0) + kg
+        total += kg
+        cantidad += int(g["n"])
+    return {
+        "depositos": cantidad,
+        "total_kg": round(total, 3),
+        "por_clase": {k: round(v, 3) for k, v in por_clase.items()},
+    }
