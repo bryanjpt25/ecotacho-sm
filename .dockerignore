@@ -1,0 +1,14 @@
+.git
+.gitignore
+rama.zip
+*.zip
+__pycache__/
+*.pyc
+.env
+bryan/
+alvaro/
+sadith/
+maricielo/
+milagros/
+docs/
+tests/

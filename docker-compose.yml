@@ -1,0 +1,45 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: ecotacho_mosquitto
+    restart: always
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./docker/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosquitto_data:/mosquitto/data
+
+  mongodb:
+    image: mongo:7.0
+    container_name: ecotacho_mongodb
+    restart: always
+    ports:
+      - "127.0.0.1:27017:27017"   # solo accesible desde esta laptop
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build: .
+    container_name: ecotacho_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017
+      - MQTT_BROKER=mosquitto
+      - MQTT_PORT=1883
+      - CORS_ORIGINS=http://localhost:3000
+    depends_on:
+      mosquitto:
+        condition: service_started
+      mongodb:
+        condition: service_healthy
+
+volumes:
+  mongo_data:
+  mosquitto_data:

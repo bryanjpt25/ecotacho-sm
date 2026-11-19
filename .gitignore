@@ -35,3 +35,7 @@ data/raw/*
 !data/.gitkeep
 
 .pio/
+.env
+rama.zip
+*.zip
+__pycache__/
