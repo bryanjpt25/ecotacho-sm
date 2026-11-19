@@ -1,6 +1,22 @@
-# EcoTacho SM — Contratos Técnicos e Interfaces (v1)
+# EcoTacho SM — Contratos Técnicos e Interfaces (v1.2)
+
+| Campo | Valor |
+|---|---|
+| Versión | 1.2 (borrador) |
+| Fecha | 18-nov-2026 |
+| Autor | Bryan |
+| Estado | Borrador; los puntos marcados **(propuesta)** son decisiones de diseño ajustables |
 
 Identificador de tacho por defecto: `tacho-unmsm-01`
+
+## 0. Convenciones
+
+* JSON en UTF-8, claves en `snake_case`, un objeto por mensaje.
+* `tacho_id` se toma **del tópico**, no del JSON.
+* Los nodos **no envían fecha/hora**. El backend agrega `received_at` (UTC, ISO-8601).
+* `uptime_ms` solo sirve para ordenar eventos de un mismo nodo; no es hora.
+* Valores de `{nodo}`: `sensores` (ESP32: HX711 + HC-SR04) y `vision` (ESP32-CAM + LCD).
+* Hora de Lima (UTC−5) solo se aplica al mostrar en el dashboard.
 
 ---
 
@@ -8,10 +24,12 @@ Identificador de tacho por defecto: `tacho-unmsm-01`
 
 | Tópico | Dirección | Descripción |
 | :--- | :--- | :--- |
-| `ecotacho/{id}/vision/evento` | ESP32-CAM → Broker | Publicación de clasificación estable |
-| `ecotacho/{id}/peso/evento` | ESP32 → Broker | Publicación de variación de peso estabilizada |
-| `ecotacho/{id}/telemetria` | ESP32 → Broker | Lectura periódica de peso y volumen (cada 5 s) |
-| `ecotacho/{id}/estado/{nodo}` | Ambos → Broker | Mensaje LWT / Estado (`online` / `offline`, retained) |
+| `ecotacho/{id}/vision/evento` | ESP32-CAM → Broker | Clasificación estable de un objeto |
+| `ecotacho/{id}/peso/evento` | ESP32 → Broker | Variación de peso ya estabilizada |
+| `ecotacho/{id}/telemetria` | ESP32 → Broker | Peso total y volumen, cada 5 s |
+| `ecotacho/{id}/estado/{nodo}` | Nodo → Broker | LWT / estado, *retained* |
+
+Los eventos usan QoS 0 (PubSubClient); la pérdida se compensa con `event_id` único y deduplicación en el backend.
 
 ---
 
@@ -27,9 +45,20 @@ Identificador de tacho por defecto: `tacho-unmsm-01`
   "uptime_ms": 123456
 }
 ```
-* **clase**: `vacio`, `plastico`, `papel_carton`, `otros`, `no_seguro`.
-* **fuente**: `ia` o `manual`.
-* **event_id**: Prefijo `v-` + nonce hexa de arranque (4-8 caracteres) + contador de 6 dígitos.
+
+| Campo | Tipo | Regla |
+|---|---|---|
+| `event_id` | string | Prefijo `v-` + nonce hexa de arranque (4–8 caracteres) + `-` + contador de 6 dígitos |
+| `clase` | string | `vacio`, `plastico`, `papel_carton`, `otros`, `no_seguro` |
+| `confianza` | número 0–1, o `null` | `null` si `fuente` es `manual` |
+| `fuente` | string | `ia` o `manual` (Plan B con botones) |
+| `uptime_ms` | entero ≥ 0 | Milisegundos desde el arranque del nodo |
+
+Reglas de publicación:
+* Se publica una clase solo tras **≥ 3 cuadros seguidos** con `confianza ≥ 0.70`, después de un `vacio`.
+* Con `confianza < 0.70` se publica `clase: "no_seguro"` con la confianza medida.
+* **(propuesta)** Un solo evento por objeto: no se publica otro hasta volver a ver `vacio`.
+* La clase `vacio` se publica como evento, pero no se correlaciona con peso.
 
 ### 2.2 Peso (`ecotacho/{id}/peso/evento`)
 ```json
@@ -41,6 +70,15 @@ Identificador de tacho por defecto: `tacho-unmsm-01`
 }
 ```
 
+| Campo | Tipo | Regla |
+|---|---|---|
+| `event_id` | string | Prefijo `p-` + nonce + contador, igual que en visión |
+| `delta_kg` | número | **Positivo** = depósito; **negativo** = retiro o vaciado |
+| `peso_total_kg` | número ≥ 0 | Peso total tras estabilizarse (≥ 2 s) |
+| `uptime_ms` | entero ≥ 0 | Igual que en visión |
+
+El nodo publica solo cuando el peso se estabiliza y el cambio supera el umbral de ruido medido en calibración.
+
 ### 2.3 Telemetría (`ecotacho/{id}/telemetria`)
 ```json
 {
@@ -50,51 +88,158 @@ Identificador de tacho por defecto: `tacho-unmsm-01`
 }
 ```
 
+| Campo | Tipo | Regla |
+|---|---|---|
+| `volumen_pct` | número 0–100 | Estimación por ultrasonido (mediana de 5 muestras) |
+| `peso_total_kg` | número ≥ 0 | Peso actual |
+| `uptime_ms` | entero ≥ 0 | |
+
+`alerta_llenado` **no** la calcula el nodo: la calcula el backend (se activa en 85 % y se limpia en 70 %).
+
+### 2.4 Estado (`ecotacho/{id}/estado/{nodo}`)
+
+Payload en **texto plano**, sin JSON: `online` u `offline`. Mensaje *retained*; `offline` lo publica el broker como LWT.
+
 ---
 
-## 3. Lógica de Correlación Backend
+## 3. Lógica de correlación (backend)
 
-1. **Ventana temporal**: 8 segundos entre `vision/evento` y `peso/evento`.
-2. **Registro de Depósito (`deposits`)**:
-   * Si llega visión (no `vacio`) y dentro de 8 s llega delta de peso → Registro exitoso con `clase` y `delta_kg`.
-   * Si llega peso sin visión previa → `clase: "sin_clasificar"`.
-   * Si llega visión sin peso tras 8 s → Guarda en `classification_events` con marca `sin_peso`.
-3. **Deduplicación**: Si el backend recibe un `event_id` ya procesado, lo ignora.
-4. **Timestamp**: El backend inyecta `received_at` en formato UTC ISO-8601 a todo documento guardado en MongoDB.
+1. **Ventana:** 8 s configurables entre `vision/evento` y `peso/evento`.
+2. **Cola FIFO (propuesta):** las visiones pendientes (clase distinta de `vacio`) se ordenan por llegada; cada `peso/evento` con `delta_kg` positivo consume la más antigua dentro de la ventana.
+3. **Resultados:**
+   * Visión + peso en ventana → `deposits` con `clase` y `delta_kg`; la visión queda `correlacionado`.
+   * Peso sin visión previa → `deposits` con `clase: "sin_clasificar"`.
+   * Visión sin peso tras 8 s → `classification_events` con `estado_correlacion: "sin_peso"`.
+   * Visión con `no_seguro` → se correlaciona normalmente y el depósito queda con `clase: "no_seguro"`.
+4. **Peso negativo (propuesta):** no crea depósito; se registra en `telemetry_logs` con `evento: "retiro"`.
+5. **Deduplicación:** un `event_id` ya procesado se ignora (índices únicos, sección 4).
+6. **Validación:** un mensaje con JSON malformado o campos fuera de rango se descarta y se registra en el log; no detiene el servicio.
+7. **Timestamp:** el backend inyecta `received_at` (UTC, ISO-8601) en todo documento guardado.
+
+Límite declarado: un objeto a la vez en la demo.
 
 ---
 
 ## 4. Colecciones MongoDB
 
-* `telemetry_logs`: `{ tacho_id, volumen_pct, peso_total_kg, uptime_ms, received_at }`
+* `telemetry_logs`: `{ tacho_id, volumen_pct, peso_total_kg, uptime_ms, evento?, delta_kg?, event_id?, received_at }` (los campos opcionales solo aparecen en registros de `evento: "retiro"`, donde `volumen_pct` es `null`)
 * `classification_events`: `{ tacho_id, event_id, clase, confianza, fuente, uptime_ms, received_at, estado_correlacion }`
 * `deposits`: `{ tacho_id, event_id_vision, event_id_peso, clase, delta_kg, peso_total_kg, fuente, received_at }`
 * `node_status`: `{ tacho_id, nodo, estado, last_seen }`
 
+`estado_correlacion`: `pendiente`, `correlacionado`, `sin_peso`; es `null` para eventos de clase `vacio`.
+
+En `deposits` con `clase: "sin_clasificar"`, `event_id_vision` y `fuente` son `null`.
+
+Índices:
+* Todas: `(tacho_id, received_at)`.
+* `classification_events.event_id`: **único**.
+* `deposits.event_id_peso`: **único**.
+* `deposits.event_id_vision`: único **parcial** (solo cuando no es nulo; en `sin_clasificar` es nulo).
+* `node_status`: único por `(tacho_id, nodo)`.
+
 ---
 
-## 5. Endpoints REST (FastAPI)
+## 5. Endpoints REST (`/api/v1`)
 
-* `GET /api/v1/tachos/{id}/estado`: Retorna estado de nodos, volumen actual y peso total.
-* `GET /api/v1/depositos?desde=&hasta=`: Retorna historial de depósitos acumulados.
-* `GET /api/v1/resumen?periodo=semana`: Retorna kg segregados por tipo de residuo.
-* `GET /api/v1/salud`: Verificación de estado del backend y MongoDB (`status: ok`).
+Fechas en ISO-8601 UTC (`2026-11-18T21:45:00Z`). Errores con el formato:
+```json
+{ "error": { "codigo": "parametro_invalido", "mensaje": "desde debe ser ISO-8601" } }
+```
+Códigos HTTP: 200, 400 (parámetro inválido), 404 (tacho inexistente), 503 (MongoDB no disponible).
+
+### `GET /api/v1/tachos/{id}/estado`
+```json
+{
+  "tacho_id": "tacho-unmsm-01",
+  "volumen_pct": 45,
+  "peso_total_kg": 1.25,
+  "alerta_llenado": false,
+  "nodos": {
+    "sensores": { "estado": "online", "last_seen": "2026-11-18T21:45:00Z" },
+    "vision":   { "estado": "online", "last_seen": "2026-11-18T21:44:58Z" }
+  },
+  "actualizado_en": "2026-11-18T21:45:00Z"
+}
+```
+
+### `GET /api/v1/depositos?desde=&hasta=&limite=`
+`limite` por defecto 50, máximo 500; orden por `received_at` descendente.
+```json
+{
+  "total": 1,
+  "items": [
+    {
+      "event_id_vision": "v-3fa9-000123",
+      "event_id_peso": "p-91c2-000087",
+      "clase": "plastico",
+      "delta_kg": 0.31,
+      "peso_total_kg": 1.25,
+      "fuente": "ia",
+      "received_at": "2026-11-18T21:45:00Z"
+    }
+  ]
+}
+```
+
+### `GET /api/v1/resumen?periodo=semana`
+`periodo`: `dia` o `semana`.
+```json
+{
+  "periodo": "semana",
+  "desde": "2026-11-12T00:00:00Z",
+  "hasta": "2026-11-18T23:59:59Z",
+  "depositos": 14,
+  "total_kg": 4.82,
+  "por_clase": {
+    "plastico": 1.90,
+    "papel_carton": 1.40,
+    "otros": 1.20,
+    "no_seguro": 0.12,
+    "sin_clasificar": 0.20
+  }
+}
+```
+
+### `GET /api/v1/salud`
+```json
+{ "status": "ok", "mongo": "ok", "mqtt": "ok" }
+```
 
 ---
 
 ## 6. Eventos WebSocket (`/ws/tacho`)
 
-El backend emitirá eventos en tiempo real hacia el dashboard en este formato:
+Formato único: `{ "tipo": "...", "data": { ... } }`. Tipos soportados: `telemetria`, `deposito`, `estado_nodo`.
+
+Al conectarse, el servidor envía **primero** un `estado_nodo` por cada nodo y la última `telemetria`, para que el dashboard no inicie vacío.
+
 ```json
-{
-  "tipo": "deposito",
-  "data": {
-    "clase": "plastico",
-    "delta_kg": 0.31,
-    "peso_total_kg": 1.25,
-    "fuente": "ia",
-    "received_at": "2026-11-18T21:45:00Z"
-  }
-}
+{ "tipo": "telemetria",
+  "data": { "volumen_pct": 45, "peso_total_kg": 1.25, "alerta_llenado": false,
+            "received_at": "2026-11-18T21:45:00Z" } }
 ```
-Tipos soportados: `telemetria`, `deposito`, `estado_nodo`.
+```json
+{ "tipo": "deposito",
+  "data": { "clase": "plastico", "delta_kg": 0.31, "peso_total_kg": 1.25,
+            "fuente": "ia", "received_at": "2026-11-18T21:45:00Z" } }
+```
+```json
+{ "tipo": "estado_nodo",
+  "data": { "nodo": "vision", "estado": "online",
+            "last_seen": "2026-11-18T21:44:58Z" } }
+```
+
+---
+
+## 7. Control de cambios
+
+* Cualquier cambio de un tópico, un campo o un endpoint se hace en este archivo, con una línea en el registro de cambios y subiendo la versión.
+* **v1.2:** detalles de persistencia (`vacio`, retiros y depósitos sin clasificar).
+* **v1.1:** respuestas REST con ejemplos y errores; eventos WebSocket completos; reglas de campos y rangos; `nodo`, payload de `estado` y `estado_correlacion` definidos; peso negativo, cola FIFO y deduplicación con índices; alerta de llenado calculada en backend.
+
+## 8. Puntos abiertos
+
+* Framework del backend (el contrato no lo exige).
+* Librería MQTT y QoS real de los nodos (PubSubClient solo publica QoS 0).
+* Umbral mínimo de peso: se fija tras la calibración de la balanza.
