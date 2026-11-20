@@ -1,7 +1,7 @@
 """EcoTacho SM — backend: ingesta MQTT -> MongoDB, correlación visión + peso y API.
 
 Contratos: docs/contratos.md. Implementa la ingesta, la correlación y los endpoints
-REST (salud, estado, depositos, resumen). El WebSocket es el siguiente paso.
+REST (salud, estado, depositos, resumen) y el WebSocket /ws/tacho.
 """
 import asyncio
 import json
@@ -11,10 +11,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import paho.mqtt.client as mqtt
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from logica import (
@@ -25,6 +26,7 @@ from logica import (
     limites_periodo,
     parsear_fecha_iso,
     parsear_topico,
+    resolver_estado,
     validar_peso,
     validar_telemetria,
     validar_vision,
@@ -42,6 +44,29 @@ mongo_client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=2000, tz_a
 db = mongo_client["ecotacho_db"]
 correlador = Correlador()
 alertas = {}  # tacho_id -> alerta_llenado vigente (con histéresis)
+
+
+class Conexiones:
+    """Clientes WebSocket conectados, agrupados por tacho. Cada uno tiene su propia cola de salida."""
+
+    def __init__(self):
+        self._por_tacho = {}
+
+    def agregar(self, tacho_id, cola):
+        self._por_tacho.setdefault(tacho_id, set()).add(cola)
+
+    def quitar(self, tacho_id, cola):
+        self._por_tacho.get(tacho_id, set()).discard(cola)
+
+    def difundir(self, tacho_id, tipo, data):
+        for cola in list(self._por_tacho.get(tacho_id, ())):
+            try:
+                cola.put_nowait({"tipo": tipo, "data": data})
+            except asyncio.QueueFull:
+                print("[WS] cliente lento: mensaje descartado")
+
+
+conexiones = Conexiones()
 
 loop = None
 cola = None
@@ -72,7 +97,7 @@ def _encolar(item):
 
 def on_message(client, userdata, msg):
     if loop is not None and cola is not None:
-        loop.call_soon_threadsafe(_encolar, (msg.topic, bytes(msg.payload)))
+        loop.call_soon_threadsafe(_encolar, (msg.topic, bytes(msg.payload), bool(msg.retain)))
 
 
 mqtt_client.on_connect = on_connect
@@ -187,9 +212,20 @@ async def procesar_peso(tacho_id, d, recibido):
             {"event_id": pend.event_id}, {"$set": {"estado_correlacion": "correlacionado"}}
         )
     print(f"[Correlación] depósito {deposito['clase']} {delta} kg")
+    conexiones.difundir(
+        tacho_id,
+        "deposito",
+        {
+            "clase": deposito["clase"],
+            "delta_kg": delta,
+            "peso_total_kg": d["peso_total_kg"],
+            "fuente": deposito["fuente"],
+            "received_at": iso(recibido),
+        },
+    )
 
 
-async def procesar(topic, raw):
+async def procesar(topic, raw, retenido=False):
     ruta = parsear_topico(topic)
     if ruta is None:
         print(f"[Ingesta] tópico ignorado: {topic}")
@@ -197,17 +233,32 @@ async def procesar(topic, raw):
     tacho_id, tipo, nodo = ruta
     recibido = datetime.now(timezone.utc)
 
+    if retenido and tipo != "estado":  # la repetición de un evento retenido no es un dato nuevo
+        print(f"[Ingesta] mensaje retenido ignorado en {topic}")
+        return
+
     if tipo == "estado":  # texto plano, no JSON
         estado = raw.decode("utf-8", errors="replace").strip()
         if estado not in ("online", "offline"):
             print(f"[Ingesta] estado inválido en {topic}: {estado!r}")
             return
-        await db.node_status.update_one(
+        cambios = {"$set": {"estado": estado}}
+        if retenido:  # repetición del broker: no se sabe cuándo se vio al nodo
+            cambios["$setOnInsert"] = {"last_seen": None}
+        else:
+            cambios["$set"]["last_seen"] = recibido
+        previo = await db.node_status.find_one_and_update(
             {"tacho_id": tacho_id, "nodo": nodo},
-            {"$set": {"estado": estado, "last_seen": recibido}},
+            cambios,
             upsert=True,
+            return_document=ReturnDocument.BEFORE,
         )
-        print(f"[Estado] {nodo}: {estado}")
+        last_seen, difundir = resolver_estado(previo, estado, retenido, recibido)
+        print(f"[Estado] {nodo}: {estado}" + (" (retenido)" if retenido else ""))
+        if difundir:
+            conexiones.difundir(
+                tacho_id, "estado_nodo", {"nodo": nodo, "estado": estado, "last_seen": iso(last_seen)}
+            )
         return
 
     try:
@@ -238,18 +289,28 @@ async def procesar(topic, raw):
                 "received_at": recibido,
             }
         )
+        conexiones.difundir(
+            tacho_id,
+            "telemetria",
+            {
+                "volumen_pct": datos["volumen_pct"],
+                "peso_total_kg": datos["peso_total_kg"],
+                "alerta_llenado": alertas[tacho_id],
+                "received_at": iso(recibido),
+            },
+        )
 
 
 async def trabajador():
     """Único consumidor de la cola: procesa los mensajes uno por uno (sin condiciones de carrera)."""
     await indices_listos.wait()
     while True:
-        topic, raw = await cola.get()
+        topic, raw, retenido = await cola.get()
         try:
             if topic == TICK:
                 await expirar_vencidos()
             else:
-                await procesar(topic, raw)
+                await procesar(topic, raw, retenido)
         except Exception as e:
             print(f"[Ingesta] Error procesando {topic}: {e}")
 
@@ -257,7 +318,7 @@ async def trabajador():
 async def ticker():
     while True:
         await asyncio.sleep(1)
-        _encolar((TICK, b""))
+        _encolar((TICK, b"", False))
 
 
 # --- Aplicación -----------------------------------------------------------------------
@@ -285,7 +346,7 @@ async def lifespan(app):
     mongo_client.close()
 
 
-app = FastAPI(title="EcoTacho SM Backend", version="1.2.0", lifespan=lifespan)
+app = FastAPI(title="EcoTacho SM Backend", version="1.3.1", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -351,30 +412,37 @@ def leer_fecha(nombre, valor):
 
 
 # --- Endpoints REST -----------------------------------------------------------------------
-@app.get("/api/v1/tachos/{tacho_id}/estado")
-async def estado(tacho_id: str):
+async def leer_estado_actual(tacho_id):
+    """Última telemetría y estado de los nodos de un tacho. Devuelve (hay_datos, telemetria, nodos)."""
     tele = await db.telemetry_logs.find_one(
         {"tacho_id": tacho_id, "volumen_pct": {"$ne": None}}, sort=[("received_at", -1)]
     )
     docs_nodos = await db.node_status.find({"tacho_id": tacho_id}).to_list(length=10)
-    if tele is None and not docs_nodos:
-        raise ErrorApi(404, "tacho_no_encontrado", f"No hay datos del tacho {tacho_id}")
-
     nodos = {n: {"estado": "desconocido", "last_seen": None} for n in ("sensores", "vision")}
     for d in docs_nodos:
         if d["nodo"] in nodos:
-            nodos[d["nodo"]] = {"estado": d["estado"], "last_seen": iso(d["last_seen"])}
+            nodos[d["nodo"]] = {"estado": d["estado"], "last_seen": iso(d.get("last_seen"))}
+    return (tele is not None or bool(docs_nodos)), tele, nodos
 
-    volumen = tele["volumen_pct"] if tele else None
+
+def alerta_vigente(tacho_id, volumen_pct):
     alerta = alertas.get(tacho_id)
     if alerta is None:  # tras un reinicio del backend, se deduce de la última lectura
-        alerta = actualizar_alerta(False, volumen) if volumen is not None else False
+        alerta = actualizar_alerta(False, volumen_pct) if volumen_pct is not None else False
+    return alerta
 
+
+@app.get("/api/v1/tachos/{tacho_id}/estado")
+async def estado(tacho_id: str):
+    hay_datos, tele, nodos = await leer_estado_actual(tacho_id)
+    if not hay_datos:
+        raise ErrorApi(404, "tacho_no_encontrado", f"No hay datos del tacho {tacho_id}")
+    volumen = tele["volumen_pct"] if tele else None
     return {
         "tacho_id": tacho_id,
         "volumen_pct": volumen,
         "peso_total_kg": tele["peso_total_kg"] if tele else None,
-        "alerta_llenado": alerta,
+        "alerta_llenado": alerta_vigente(tacho_id, volumen),
         "nodos": nodos,
         "actualizado_en": iso(tele["received_at"]) if tele else None,
     }
@@ -438,3 +506,62 @@ async def resumen(periodo: str = "semana", tacho_id: str = DEFAULT_TACHO_ID):
         ]
     ).to_list(length=None)
     return {"periodo": periodo, "desde": iso(desde), "hasta": iso(hasta), **armar_resumen(grupos)}
+
+
+# --- WebSocket ------------------------------------------------------------------------------
+async def mensajes_iniciales(tacho_id):
+    """Al conectarse: un estado_nodo por nodo y la última telemetría (si existe)."""
+    _, tele, nodos = await leer_estado_actual(tacho_id)
+    mensajes = [
+        {"tipo": "estado_nodo", "data": {"nodo": n, "estado": v["estado"], "last_seen": v["last_seen"]}}
+        for n, v in nodos.items()
+    ]
+    if tele:
+        mensajes.append(
+            {
+                "tipo": "telemetria",
+                "data": {
+                    "volumen_pct": tele["volumen_pct"],
+                    "peso_total_kg": tele["peso_total_kg"],
+                    "alerta_llenado": alerta_vigente(tacho_id, tele["volumen_pct"]),
+                    "received_at": iso(tele["received_at"]),
+                },
+            }
+        )
+    return mensajes
+
+
+@app.websocket("/ws/tacho")
+async def ws_tacho(ws: WebSocket, tacho_id: str = DEFAULT_TACHO_ID):
+    await ws.accept()
+    salida = asyncio.Queue(maxsize=100)
+    conexiones.agregar(tacho_id, salida)  # primero se registra, para no perder eventos durante el arranque
+    tareas = []
+    try:
+        for mensaje in await mensajes_iniciales(tacho_id):
+            await ws.send_json(mensaje)
+
+        async def escritor():
+            while True:
+                await ws.send_json(await salida.get())
+
+        async def lector():  # se ignora lo que envíe el cliente; solo detecta la desconexión
+            while True:
+                if (await ws.receive())["type"] == "websocket.disconnect":
+                    return
+
+        tareas = [asyncio.create_task(escritor()), asyncio.create_task(lector())]
+        hechas, _ = await asyncio.wait(tareas, return_when=asyncio.FIRST_COMPLETED)
+        for t in hechas:
+            t.exception()  # marca la excepción como atendida
+    except PyMongoError:
+        try:
+            await ws.close(code=1011)
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[WS] conexión cerrada: {e}")
+    finally:
+        for t in tareas:
+            t.cancel()
+        conexiones.quitar(tacho_id, salida)

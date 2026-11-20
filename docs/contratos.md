@@ -1,8 +1,8 @@
-# EcoTacho SM — Contratos Técnicos e Interfaces (v1.3)
+# EcoTacho SM — Contratos Técnicos e Interfaces (v1.5)
 
 | Campo | Valor |
 |---|---|
-| Versión | 1.3 (borrador) |
+| Versión | 1.5 (borrador) |
 | Fecha | 18-nov-2026 |
 | Autor | Bryan |
 | Estado | Borrador; los puntos marcados **(propuesta)** son decisiones de diseño ajustables |
@@ -100,6 +100,8 @@ El nodo publica solo cuando el peso se estabiliza y el cambio supera el umbral d
 
 Payload en **texto plano**, sin JSON: `online` u `offline`. Mensaje *retained*; `offline` lo publica el broker como LWT.
 
+Los mensajes retenidos que el broker repite al reconectar el backend actualizan `estado`, pero **no** `last_seen`: solo un mensaje recibido en vivo lo actualiza. Si el estado de un nodo se conoce únicamente por un mensaje retenido, `last_seen` es `null`. Un retenido se difunde por WebSocket solo si cambia el estado. Los demás tópicos no deben publicarse como retained; el backend ignora los que lleguen así.
+
 ---
 
 ## 3. Lógica de correlación (backend)
@@ -125,7 +127,7 @@ Límite declarado: un objeto a la vez en la demo.
 * `telemetry_logs`: `{ tacho_id, volumen_pct, peso_total_kg, uptime_ms, evento?, delta_kg?, event_id?, received_at }` (los campos opcionales solo aparecen en registros de `evento: "retiro"`, donde `volumen_pct` es `null`)
 * `classification_events`: `{ tacho_id, event_id, clase, confianza, fuente, uptime_ms, received_at, estado_correlacion }`
 * `deposits`: `{ tacho_id, event_id_vision, event_id_peso, clase, delta_kg, peso_total_kg, fuente, received_at }`
-* `node_status`: `{ tacho_id, nodo, estado, last_seen }`
+* `node_status`: `{ tacho_id, nodo, estado, last_seen }` (`last_seen` puede ser `null`)
 
 `estado_correlacion`: `pendiente`, `correlacionado`, `sin_peso`; es `null` para eventos de clase `vacio`.
 
@@ -213,9 +215,17 @@ Códigos HTTP: 200; 400 con `codigo: "parametro_invalido"`; 404 con `codigo: "ta
 
 ## 6. Eventos WebSocket (`/ws/tacho`)
 
+URL: `ws://{host}:8000/ws/tacho?tacho_id=tacho-unmsm-01` (`tacho_id` es opcional y por defecto es `tacho-unmsm-01`). Cada cliente recibe solo los eventos de su tacho. El servidor ignora lo que envíe el cliente.
+
 Formato único: `{ "tipo": "...", "data": { ... } }`. Tipos soportados: `telemetria`, `deposito`, `estado_nodo`.
 
-Al conectarse, el servidor envía **primero** un `estado_nodo` por cada nodo y la última `telemetria`, para que el dashboard no inicie vacío.
+Al conectarse, el servidor envía **primero** un `estado_nodo` por cada nodo (`sensores` y `vision`, con `desconocido` si aún no han reportado) y, si existe, la última `telemetria`, para que el dashboard no inicie vacío. Después envía cada evento en cuanto el backend lo procesa:
+
+* `telemetria`: por cada mensaje de telemetría (cada 5 s), con `alerta_llenado` calculada por el backend.
+* `deposito`: por cada depósito creado, incluidos los `sin_clasificar` (con `fuente: null`).
+* `estado_nodo`: por cada cambio de estado de un nodo (incluye el LWT `offline`).
+
+Si MongoDB no está disponible al conectarse, el servidor cierra con el código `1011`. Si un cliente es lento y su cola de 100 mensajes se llena, los mensajes nuevos se descartan para ese cliente.
 
 ```json
 { "tipo": "telemetria",
@@ -238,6 +248,8 @@ Al conectarse, el servidor envía **primero** un `estado_nodo` por cada nodo y l
 ## 7. Control de cambios
 
 * Cualquier cambio de un tópico, un campo o un endpoint se hace en este archivo, con una línea en el registro de cambios y subiendo la versión.
+* **v1.5:** los mensajes de estado retenidos no actualizan `last_seen`; el backend ignora retenidos en tópicos que no son de estado.
+* **v1.4:** WebSocket implementado: parámetro `tacho_id`, mensajes iniciales con `desconocido`, eventos que se difunden y cierre `1011`.
 * **v1.3:** endpoints REST implementados (`estado`, `depositos`, `resumen`): parámetro `tacho_id`, significado de `total`, ventanas de `resumen` en hora de Lima, valores `desconocido` y códigos de error.
 * **v1.2:** detalles de persistencia (`vacio`, retiros y depósitos sin clasificar).
 * **v1.1:** respuestas REST con ejemplos y errores; eventos WebSocket completos; reglas de campos y rangos; `nodo`, payload de `estado` y `estado_correlacion` definidos; peso negativo, cola FIFO y deduplicación con índices; alerta de llenado calculada en backend.

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>EcoTacho SM · Prueba WebSocket</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#fff; --fg:#1d2433; --mut:#6b7385; --card:#f2f4f8; --ok:#1a7f4b; --err:#b3261e; --tel:#1565c0; --dep:#7b3fa0; --est:#a15c00; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#12151c; --fg:#e6e9f0; --mut:#98a0b3; --card:#1c212c; --ok:#4cc38a; --err:#ff8a80; --tel:#6cb2ff; --dep:#d09cff; --est:#ffb74d; } }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui, sans-serif; }
+  h1 { font-size:18px; margin:0 0 12px; }
+  .fila { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+  input { flex:1; min-width:260px; padding:8px; border:1px solid var(--mut); border-radius:6px; background:var(--card); color:var(--fg); }
+  button { padding:8px 14px; border:0; border-radius:6px; background:var(--tel); color:#fff; cursor:pointer; }
+  button.sec { background:var(--mut); }
+  #estado { font-weight:600; }
+  #log { background:var(--card); border-radius:8px; padding:8px; height:60vh; overflow:auto; font:13px/1.5 ui-monospace, Consolas, monospace; }
+  .l { padding:2px 0; border-bottom:1px solid rgba(128,128,128,.15); white-space:pre-wrap; word-break:break-all; }
+  .telemetria { color:var(--tel); } .deposito { color:var(--dep); } .estado_nodo { color:var(--est); } .sis { color:var(--mut); }
+</style>
+</head>
+<body>
+<h1>EcoTacho SM · Prueba del WebSocket</h1>
+<div class="fila">
+  <input id="url" value="ws://localhost:8000/ws/tacho?tacho_id=tacho-unmsm-01">
+  <button id="con">Conectar</button>
+  <button id="des" class="sec">Desconectar</button>
+  <button id="lim" class="sec">Limpiar</button>
+</div>
+<div class="fila">Estado: <span id="estado">desconectado</span></div>
+<div id="log"></div>
+<script>
+  let ws = null;
+  const log = document.getElementById("log"), estado = document.getElementById("estado");
+  function pon(txt, clase) {
+    const d = document.createElement("div");
+    d.className = "l " + clase;
+    d.textContent = new Date().toLocaleTimeString() + "  " + txt;
+    log.appendChild(d); log.scrollTop = log.scrollHeight;
+  }
+  function est(t, c) { estado.textContent = t; estado.style.color = c; }
+  document.getElementById("con").onclick = () => {
+    if (ws) ws.close();
+    ws = new WebSocket(document.getElementById("url").value);
+    ws.onopen = () => { est("conectado", "var(--ok)"); pon("conexión abierta", "sis"); };
+    ws.onclose = (e) => { est("desconectado", "var(--err)"); pon("conexión cerrada (código " + e.code + ")", "sis"); };
+    ws.onerror = () => pon("error de conexión: ¿está arriba el backend?", "sis");
+    ws.onmessage = (e) => {
+      let m; try { m = JSON.parse(e.data); } catch { pon("mensaje no JSON: " + e.data, "sis"); return; }
+      pon(m.tipo + "  " + JSON.stringify(m.data), m.tipo);
+    };
+  };
+  document.getElementById("des").onclick = () => { if (ws) ws.close(); };
+  document.getElementById("lim").onclick = () => { log.textContent = ""; };
+</script>
+</body>
+</html>

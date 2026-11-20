@@ -182,3 +182,16 @@ def armar_resumen(grupos):
         "total_kg": round(total, 3),
         "por_clase": {k: round(v, 3) for k, v in por_clase.items()},
     }
+
+
+def resolver_estado(previo, estado, retenido, recibido):
+    """Decide qué hacer con un mensaje de estado de un nodo.
+
+    Un mensaje retenido es la repetición que el broker entrega al reconectar: no indica cuándo se
+    vio por última vez al nodo, así que no toca `last_seen`. Devuelve (last_seen, difundir).
+    """
+    if not retenido:
+        return recibido, True
+    last_seen = previo.get("last_seen") if previo else None
+    cambio = previo is None or previo.get("estado") != estado
+    return last_seen, cambio

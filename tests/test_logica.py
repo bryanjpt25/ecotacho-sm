@@ -14,6 +14,7 @@ from logica import (  # noqa: E402
     limites_periodo,
     parsear_fecha_iso,
     parsear_topico,
+    resolver_estado,
     validar_peso,
     validar_telemetria,
     validar_vision,
@@ -126,6 +127,26 @@ class TestApi(unittest.TestCase):
         self.assertEqual(r["total_kg"], 0.51)
         self.assertEqual(r["por_clase"], {"plastico": 0.31, "papel_carton": 0.0, "otros": 0.0, "no_seguro": 0.0, "sin_clasificar": 0.2})
         self.assertEqual(armar_resumen([])["total_kg"], 0.0)
+
+
+class TestEstado(unittest.TestCase):
+    ahora = datetime(2026, 11, 19, 20, 0, tzinfo=timezone.utc)
+    antes = datetime(2026, 11, 19, 19, 0, tzinfo=timezone.utc)
+
+    def test_en_vivo_actualiza_last_seen(self):
+        self.assertEqual(resolver_estado({"estado": "online", "last_seen": self.antes}, "online", False, self.ahora), (self.ahora, True))
+        self.assertEqual(resolver_estado(None, "online", False, self.ahora), (self.ahora, True))
+
+    def test_retenido_no_toca_last_seen(self):
+        previo = {"estado": "online", "last_seen": self.antes}
+        self.assertEqual(resolver_estado(previo, "online", True, self.ahora), (self.antes, False))
+
+    def test_retenido_con_cambio_se_difunde(self):
+        previo = {"estado": "online", "last_seen": self.antes}
+        self.assertEqual(resolver_estado(previo, "offline", True, self.ahora), (self.antes, True))
+
+    def test_retenido_de_nodo_nuevo(self):
+        self.assertEqual(resolver_estado(None, "online", True, self.ahora), (None, True))
 
 
 if __name__ == "__main__":
