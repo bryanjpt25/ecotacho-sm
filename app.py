@@ -225,6 +225,18 @@ async def procesar_peso(tacho_id, d, recibido):
     )
 
 
+async def cargar_alerta(tacho_id):
+    """Recupera la alerta vigente desde la última telemetría guardada (tras un reinicio)."""
+    ultima = await db.telemetry_logs.find_one(
+        {"tacho_id": tacho_id, "volumen_pct": {"$ne": None}}, sort=[("received_at", -1)]
+    )
+    if ultima is None:
+        return False
+    if "alerta_llenado" in ultima:
+        return bool(ultima["alerta_llenado"])
+    return actualizar_alerta(False, ultima["volumen_pct"])  # registros antiguos sin el campo
+
+
 async def procesar(topic, raw, retenido=False):
     ruta = parsear_topico(topic)
     if ruta is None:
@@ -279,26 +291,38 @@ async def procesar(topic, raw, retenido=False):
         if error:
             print(f"[Ingesta] telemetria descartada: {error}")
             return
-        alertas[tacho_id] = actualizar_alerta(alertas.get(tacho_id, False), datos["volumen_pct"])
+        previa = alertas.get(tacho_id)
+        if previa is None:  # primer mensaje desde el arranque: se recupera lo guardado
+            previa = await cargar_alerta(tacho_id)
+        alerta = actualizar_alerta(previa, datos["volumen_pct"])
         await db.telemetry_logs.insert_one(
             {
                 "tacho_id": tacho_id,
                 "volumen_pct": datos["volumen_pct"],
                 "peso_total_kg": datos["peso_total_kg"],
+                "alerta_llenado": alerta,
                 "uptime_ms": datos["uptime_ms"],
                 "received_at": recibido,
             }
         )
+        alertas[tacho_id] = alerta
         conexiones.difundir(
             tacho_id,
             "telemetria",
             {
                 "volumen_pct": datos["volumen_pct"],
                 "peso_total_kg": datos["peso_total_kg"],
-                "alerta_llenado": alertas[tacho_id],
+                "alerta_llenado": alerta,
                 "received_at": iso(recibido),
             },
         )
+        if alerta != previa:  # la alerta se activó o se limpió
+            print(f"[Alerta] llenado {'ACTIVA' if alerta else 'limpia'} ({datos['volumen_pct']} %)")
+            conexiones.difundir(
+                tacho_id,
+                "alerta_llenado",
+                {"activa": alerta, "volumen_pct": datos["volumen_pct"], "received_at": iso(recibido)},
+            )
 
 
 async def trabajador():
@@ -346,7 +370,7 @@ async def lifespan(app):
     mongo_client.close()
 
 
-app = FastAPI(title="EcoTacho SM Backend", version="1.3.1", lifespan=lifespan)
+app = FastAPI(title="EcoTacho SM Backend", version="1.4.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -425,11 +449,16 @@ async def leer_estado_actual(tacho_id):
     return (tele is not None or bool(docs_nodos)), tele, nodos
 
 
-def alerta_vigente(tacho_id, volumen_pct):
+def alerta_vigente(tacho_id, tele):
+    """Alerta de llenado vigente: la de memoria o, si no hay (reinicio), la guardada en la última telemetría."""
     alerta = alertas.get(tacho_id)
-    if alerta is None:  # tras un reinicio del backend, se deduce de la última lectura
-        alerta = actualizar_alerta(False, volumen_pct) if volumen_pct is not None else False
-    return alerta
+    if alerta is not None:
+        return alerta
+    if tele is None:
+        return False
+    if "alerta_llenado" in tele:
+        return bool(tele["alerta_llenado"])
+    return actualizar_alerta(False, tele["volumen_pct"])  # registros antiguos sin el campo
 
 
 @app.get("/api/v1/tachos/{tacho_id}/estado")
@@ -442,7 +471,7 @@ async def estado(tacho_id: str):
         "tacho_id": tacho_id,
         "volumen_pct": volumen,
         "peso_total_kg": tele["peso_total_kg"] if tele else None,
-        "alerta_llenado": alerta_vigente(tacho_id, volumen),
+        "alerta_llenado": alerta_vigente(tacho_id, tele),
         "nodos": nodos,
         "actualizado_en": iso(tele["received_at"]) if tele else None,
     }
@@ -523,7 +552,7 @@ async def mensajes_iniciales(tacho_id):
                 "data": {
                     "volumen_pct": tele["volumen_pct"],
                     "peso_total_kg": tele["peso_total_kg"],
-                    "alerta_llenado": alerta_vigente(tacho_id, tele["volumen_pct"]),
+                    "alerta_llenado": alerta_vigente(tacho_id, tele),
                     "received_at": iso(tele["received_at"]),
                 },
             }

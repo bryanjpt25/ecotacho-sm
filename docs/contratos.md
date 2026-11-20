@@ -1,8 +1,8 @@
-# EcoTacho SM — Contratos Técnicos e Interfaces (v1.5)
+# EcoTacho SM — Contratos Técnicos e Interfaces (v1.6)
 
 | Campo | Valor |
 |---|---|
-| Versión | 1.5 (borrador) |
+| Versión | 1.6 (borrador) |
 | Fecha | 18-nov-2026 |
 | Autor | Bryan |
 | Estado | Borrador; los puntos marcados **(propuesta)** son decisiones de diseño ajustables |
@@ -94,7 +94,7 @@ El nodo publica solo cuando el peso se estabiliza y el cambio supera el umbral d
 | `peso_total_kg` | número ≥ 0 | Peso actual |
 | `uptime_ms` | entero ≥ 0 | |
 
-`alerta_llenado` **no** la calcula el nodo: la calcula el backend (se activa en 85 % y se limpia en 70 %).
+`alerta_llenado` **no** la calcula el nodo: la calcula el backend (se activa en 85 % y se limpia en 70 %). El backend la guarda en cada registro de telemetría, por lo que se conserva al reiniciarlo.
 
 ### 2.4 Estado (`ecotacho/{id}/estado/{nodo}`)
 
@@ -124,7 +124,7 @@ Límite declarado: un objeto a la vez en la demo.
 
 ## 4. Colecciones MongoDB
 
-* `telemetry_logs`: `{ tacho_id, volumen_pct, peso_total_kg, uptime_ms, evento?, delta_kg?, event_id?, received_at }` (los campos opcionales solo aparecen en registros de `evento: "retiro"`, donde `volumen_pct` es `null`)
+* `telemetry_logs`: `{ tacho_id, volumen_pct, peso_total_kg, alerta_llenado?, uptime_ms, evento?, delta_kg?, event_id?, received_at }` (`alerta_llenado` solo aparece en los registros de telemetría; `evento`, `delta_kg` y `event_id` solo en los de `evento: "retiro"`, donde `volumen_pct` es `null`)
 * `classification_events`: `{ tacho_id, event_id, clase, confianza, fuente, uptime_ms, received_at, estado_correlacion }`
 * `deposits`: `{ tacho_id, event_id_vision, event_id_peso, clase, delta_kg, peso_total_kg, fuente, received_at }`
 * `node_status`: `{ tacho_id, nodo, estado, last_seen }` (`last_seen` puede ser `null`)
@@ -204,7 +204,7 @@ Códigos HTTP: 200; 400 con `codigo: "parametro_invalido"`; 404 con `codigo: "ta
 ```
 
 ### Notas de `GET /api/v1/tachos/{id}/estado`
-`volumen_pct`, `peso_total_kg` y `actualizado_en` son `null` si todavía no hay telemetría. Cada nodo (`sensores`, `vision`) trae `estado: "desconocido"` y `last_seen: null` si aún no ha reportado. `alerta_llenado` usa histéresis (se activa en 85 %, se limpia en 70 %).
+`volumen_pct`, `peso_total_kg` y `actualizado_en` son `null` si todavía no hay telemetría. Cada nodo (`sensores`, `vision`) trae `estado: "desconocido"` y `last_seen: null` si aún no ha reportado. `alerta_llenado` usa histéresis (se activa en 85 %, se limpia en 70 %) y se conserva al reiniciar el backend.
 
 ### `GET /api/v1/salud`
 ```json
@@ -217,13 +217,14 @@ Códigos HTTP: 200; 400 con `codigo: "parametro_invalido"`; 404 con `codigo: "ta
 
 URL: `ws://{host}:8000/ws/tacho?tacho_id=tacho-unmsm-01` (`tacho_id` es opcional y por defecto es `tacho-unmsm-01`). Cada cliente recibe solo los eventos de su tacho. El servidor ignora lo que envíe el cliente.
 
-Formato único: `{ "tipo": "...", "data": { ... } }`. Tipos soportados: `telemetria`, `deposito`, `estado_nodo`.
+Formato único: `{ "tipo": "...", "data": { ... } }`. Tipos soportados: `telemetria`, `deposito`, `estado_nodo`, `alerta_llenado`.
 
 Al conectarse, el servidor envía **primero** un `estado_nodo` por cada nodo (`sensores` y `vision`, con `desconocido` si aún no han reportado) y, si existe, la última `telemetria`, para que el dashboard no inicie vacío. Después envía cada evento en cuanto el backend lo procesa:
 
 * `telemetria`: por cada mensaje de telemetría (cada 5 s), con `alerta_llenado` calculada por el backend.
 * `deposito`: por cada depósito creado, incluidos los `sin_clasificar` (con `fuente: null`).
 * `estado_nodo`: por cada cambio de estado de un nodo (incluye el LWT `offline`).
+* `alerta_llenado`: solo cuando la alerta **cambia** (se activa en 85 % o se limpia en 70 %); se envía justo después de la `telemetria` que la provocó. No se envía al conectarse: el estado vigente viaja en el campo `alerta_llenado` de la telemetría inicial.
 
 Si MongoDB no está disponible al conectarse, el servidor cierra con el código `1011`. Si un cliente es lento y su cola de 100 mensajes se llena, los mensajes nuevos se descartan para ese cliente.
 
@@ -242,12 +243,18 @@ Si MongoDB no está disponible al conectarse, el servidor cierra con el código 
   "data": { "nodo": "vision", "estado": "online",
             "last_seen": "2026-11-18T21:44:58Z" } }
 ```
+```json
+{ "tipo": "alerta_llenado",
+  "data": { "activa": true, "volumen_pct": 88,
+            "received_at": "2026-11-18T21:45:00Z" } }
+```
 
 ---
 
 ## 7. Control de cambios
 
 * Cualquier cambio de un tópico, un campo o un endpoint se hace en este archivo, con una línea en el registro de cambios y subiendo la versión.
+* **v1.6:** la alerta de llenado se guarda en `telemetry_logs` (sobrevive a reinicios) y se difunde el evento WebSocket `alerta_llenado` cuando cambia.
 * **v1.5:** los mensajes de estado retenidos no actualizan `last_seen`; el backend ignora retenidos en tópicos que no son de estado.
 * **v1.4:** WebSocket implementado: parámetro `tacho_id`, mensajes iniciales con `desconocido`, eventos que se difunden y cierre `1011`.
 * **v1.3:** endpoints REST implementados (`estado`, `depositos`, `resumen`): parámetro `tacho_id`, significado de `total`, ventanas de `resumen` en hora de Lima, valores `desconocido` y códigos de error.
